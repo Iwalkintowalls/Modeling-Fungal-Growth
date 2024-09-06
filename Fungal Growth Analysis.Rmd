@@ -1,0 +1,778 @@
+---
+title: "Fungal Growth Analysis"
+author: "Your Name"
+output: 
+  html_document:
+    theme: united
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+# Model Selection {#tab-model-selection}
+
+In this section, we will compare the performance of three different models: **Linear**, **Exponential**, and **Log-Transformed** for each fungal species at various temperatures. We will compare the following metrics:
+
+- **Residual Sum of Squares (RSS)**: Lower values indicate a better fit.
+- **Adjusted R-squared**: Higher values indicate a better fit.
+- **AIC (Akaike Information Criterion)**: Lower values indicate a better model fit considering model complexity.
+- **BIC (Bayesian Information Criterion)**: Lower values indicate a better model fit, penalizing model complexity more heavily than AIC.
+
+```{r load-packages, echo=FALSE, message=FALSE, warning=FALSE}
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(viridis)
+library(tidyr)
+library(car)
+library(multcompView)
+library(agricolae)
+library(ggsignif)
+library(report)
+library(multcomp)
+library(growthcurver)
+library (gridExtra)
+library(caret)
+library(kableExtra)
+library(plotly)
+library(ggtext)
+library(glue)
+library(ggtext)
+library(patchwork) 
+```
+
+```{r}
+df <- read.csv("Rosalynn Tidy data.csv")
+#Filter week 1-5, Suillus data up to week 6. 
+df_1_5 <- df %>%
+  filter(Week %in% 1:5)
+# Convert relevant columns to factors
+df_1_5$Temperature..Celsius. <- as.factor(df_1_5$Temperature..Celsius.)
+#df_1_5$Week <- as.factor(df_1_5$Week)
+df_1_5$Species <- as.factor(df_1_5$Species)
+# Rename the column
+colnames(df_1_5)[colnames(df_1_5) == "Temperature..Celsius."] <- "Temperature"
+
+# Initialize an empty list to store model metrics
+model_metrics <- list()
+
+# Loop over each species and temperature to fit models and calculate metrics
+for(species in unique(df_1_5$Species)) {
+  for(temp in unique(df_1_5$Temperature)) {
+    
+    # Filter the data for this species and temperature
+    df_subset <- df_1_5 %>% filter(Species == species, Temperature == temp)
+    
+    # Fit the Linear Model
+    linear_model <- lm(Growth ~ Week, data = df_subset)
+    
+    # Fit the Exponential Model (log-transformed linear)
+    exp_model <- lm(log(Growth) ~ Week, data = df_subset)
+    
+    # Fit the Logarithmic Model (Growth ~ log(Week))
+    log_fit_model <- lm(Growth ~ log(Week), data = df_subset)
+    
+    # Calculate Metrics for each model
+    metrics <- data.frame(
+      Species = species,
+      Temperature = temp,
+      Metric = c("RSS", "Adjusted R-squared", "AIC", "BIC"),
+      Linear_Model = c(sum(residuals(linear_model)^2),
+                       summary(linear_model)$adj.r.squared,
+                       AIC(linear_model),
+                       BIC(linear_model)),
+      Exponential_Model = c(sum(residuals(exp_model)^2),
+                            summary(exp_model)$adj.r.squared,
+                            AIC(exp_model),
+                            BIC(exp_model)),
+      Logarithmic_Model = c(sum(residuals(log_fit_model)^2),
+                            summary(log_fit_model)$adj.r.squared,
+                            AIC(log_fit_model),
+                            BIC(log_fit_model))
+    )
+    
+    # Determine the best model for each metric
+    metrics$Best_Model <- sapply(1:nrow(metrics), function(i) {
+      if (metrics$Metric[i] == "Adjusted R-squared") {
+        # For Adjusted R-squared, higher is better
+        if (metrics$Linear_Model[i] == max(metrics$Linear_Model[i], metrics$Exponential_Model[i], metrics$Logarithmic_Model[i])) {
+          "Linear Model"
+        } else if (metrics$Exponential_Model[i] == max(metrics$Linear_Model[i], metrics$Exponential_Model[i], metrics$Logarithmic_Model[i])) {
+          "Exponential Model"
+        } else {
+          "Logarithmic Model"
+        }
+      } else {
+        # For RSS, AIC, and BIC, lower is better
+        if (metrics$Linear_Model[i] == min(metrics$Linear_Model[i], metrics$Exponential_Model[i], metrics$Logarithmic_Model[i])) {
+          "Linear Model"
+        } else if (metrics$Exponential_Model[i] == min(metrics$Linear_Model[i], metrics$Exponential_Model[i], metrics$Logarithmic_Model[i])) {
+          "Exponential Model"
+        } else {
+          "Logarithmic Model"
+        }
+      }
+    })
+    
+    # Store the metrics in the list
+    model_metrics[[paste(species, temp, sep = "_")]] <- metrics
+  }
+}
+
+# Combine all metrics into one data frame
+model_comparison <- do.call(rbind, model_metrics)
+```
+
+```{r}
+# Display the table of model comparison with scrolling enabled for rows
+model_comparison %>%
+  kbl(caption = "Model Comparison for Different Species and Temperatures") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = TRUE, 
+                fixed_thead = TRUE) %>%
+  scroll_box(height = "400px")
+```
+
+
+
+
+# Model Building: Exponential Models {#tab-model-building}
+
+In this section, we build **exponential models** to describe the growth of fungi at different temperatures. We will visualize both the **raw data** and the **predicted data** from the exponential models, and offer the option to compare them in the same plot.
+
+```{r}
+# Create a list to store the fitted models and predicted data
+exponential_models <- list()
+predicted_data_list <- list()
+
+# Loop over each species and temperature to fit exponential models
+for(species in unique(df_1_5$Species)) {
+  for(temp in unique(df_1_5$Temperature)) {
+    
+    # Filter the data for this species and temperature
+    df_subset <- df_1_5 %>% filter(Species == species, Temperature == temp)
+    
+    # Fit the Exponential Model (log-transformed linear)
+    exp_model <- lm(log(Growth) ~ Week, data = df_subset)
+    
+    # Store the model
+    model_name <- paste("Exp_Model", species, temp, sep = "_")
+    exponential_models[[model_name]] <- exp_model
+    
+    # Generate predicted values
+    predicted_log_growth <- predict(exp_model, newdata = df_subset)
+    predicted_growth <- exp(predicted_log_growth)  # Back-transform to the original scale
+    
+    # Store predicted data in a data frame
+    df_predicted <- df_subset %>%
+      mutate(Predicted_Growth = predicted_growth)
+    
+    # Store the predicted data for later use
+    predicted_data_list[[model_name]] <- df_predicted
+  }
+}
+
+# Combine all predicted data into one data frame for easier use
+all_predicted_data <- bind_rows(predicted_data_list)
+
+# Print a sample of the predicted data
+head(all_predicted_data)
+```
+
+### Compare Raw and Fitted Data
+```{r graph-data, echo=FALSE, message=FALSE, warning=FALSE, fig.width=8, fig.height=7}
+# Create a function to abbreviate species names with italic Markdown syntax
+abbreviate_species <- function(species) {
+  species <- gsub("Cenococcum geophilum", "<i>C. geophilum</i>", species)
+  species <- gsub("Laccaria bicolor", "<i>L. bicolor</i>", species)
+  species <- gsub("Rhizopogon Evadens", "<i>R. evadens</i>", species)
+  species <- gsub("Rhizopogon idahoensis", "<i>R. idahoensis</i>", species)
+  species <- gsub("Suillus lakei", "<i>S. lakei</i>", species)
+  return(species)
+}
+
+# Apply the abbreviation function to Species column
+df_1_5$Species <- abbreviate_species(df_1_5$Species)
+all_predicted_data$Species <- abbreviate_species(all_predicted_data$Species)
+
+# Custom labeller for temperature, to directly label 15°C, 20°C, 25°C
+temperature_labeller <- as_labeller(c(
+  "15" = "15°C",
+  "20" = "20°C",
+  "25" = "25°C"
+))
+
+# Plot raw data
+plot_raw <- ggplot(df_1_5, aes(x = Week, y = Growth, color = Species)) +
+  geom_point() +
+  facet_grid(Temperature ~ Species, labeller = labeller(Temperature = temperature_labeller)) +  # Temperature as rows, Species as columns
+  labs(title = "Raw Growth Data", x = "Week", y = "Growth (cm^2)") +
+  theme_minimal() +
+  theme(
+    strip.text.x = element_markdown(size = 12),        # Use element_markdown for italic facet labels
+    strip.text.y = element_text(size = 12),            # Adjust temperature label size
+    axis.text = element_text(size = 10),               # Adjust axis text size
+    plot.margin = margin(2, 2, 2, 2, "cm"),            # Add margins to avoid text overlap
+    legend.position = "none"                           # Remove redundant legend
+  )
+
+# Plot predicted data
+plot_predicted <- ggplot(all_predicted_data, aes(x = Week, y = Predicted_Growth, color = Species)) +
+  geom_line() +
+  facet_grid(Temperature ~ Species, labeller = labeller(Temperature = temperature_labeller)) +  # Temperature as rows, Species as columns
+  labs(title = "Predicted Growth Data (Exponential Model)", x = "Week", y = "Predicted Growth (cm^2)") +
+  theme_minimal() +
+  theme(
+    strip.text.x = element_markdown(size = 12),        # Use element_markdown for italic facet labels
+    strip.text.y = element_text(size = 12),            # Adjust temperature label size
+    axis.text = element_text(size = 10),               # Adjust axis text size
+    plot.margin = margin(2, 2, 2, 2, "cm"),            # Add margins to avoid text overlap
+    legend.position = "none"                           # Remove redundant legend
+  )
+
+# Combine raw and predicted data in one plot
+plot_combined <- ggplot() +
+  geom_point(data = df_1_5, aes(x = Week, y = Growth, color = Species)) +
+  geom_line(data = all_predicted_data, aes(x = Week, y = Predicted_Growth, color = Species)) +
+  facet_grid(Temperature ~ Species, labeller = labeller(Temperature = temperature_labeller)) +  # Temperature as rows, Species as columns
+  labs(title = "Raw and Predicted Growth Data", x = "Week", y = "Growth (cm^2)") +
+  theme_minimal() +
+  theme(
+    strip.text.x = element_markdown(size = 12),        # Use element_markdown for italic facet labels
+    strip.text.y = element_text(size = 12),            # Adjust temperature label size
+    axis.text = element_text(size = 10),               # Adjust axis text size
+    plot.margin = margin(2, 2, 2, 2, "cm"),            # Add margins to avoid text overlap
+    legend.position = "none"                           # Remove redundant legend
+  )
+
+# Convert ggplot objects to interactive plots using plotly
+plotly_raw <- ggplotly(plot_raw)
+plotly_predicted <- ggplotly(plot_predicted)
+plotly_combined <- ggplotly(plot_combined)
+
+# Display the interactive plots
+plotly_raw
+plotly_predicted
+plotly_combined
+```
+### Exponential Model Summary for Each Species at Each Temperature
+
+The table below summarizes the results of fitting exponential models for each fungal species at different temperatures. For each combination of species and temperature, the following details are provided:
+
+- **F-Value**: This is the F-statistic for the model, which assesses the overall significance of the model.
+- **P-Value**: The P-value indicates the significance of the model. A lower P-value (< 0.05) suggests that the model is statistically significant.
+- **Degrees of Freedom**: This represents the number of data points minus the number of parameters estimated by the model.
+- **Model Equation**: The fitted equation for the model, represented as a linear relationship between the logarithm of growth and time (weeks).
+```{r}
+# Initialize a data frame to store the summary information
+model_summary <- data.frame(Species = character(), 
+                            Temperature = numeric(), 
+                            F_Value = numeric(), 
+                            P_Value = numeric(), 
+                            Degrees_of_Freedom = character(), 
+                            Equation = character(),
+                            stringsAsFactors = FALSE)
+
+# Loop over each species and temperature to fit exponential models and extract metrics
+for(species in unique(df_1_5$Species)) {
+  for(temp in unique(df_1_5$Temperature)) {
+    
+    # Filter the data for this species and temperature
+    df_subset <- df_1_5 %>% filter(Species == species, Temperature == temp)
+    
+    # Fit the exponential model (log-transformed linear)
+    exp_model <- lm(log(Growth) ~ Week, data = df_subset)
+    
+    # Extract model summary details
+    model_summary_info <- summary(exp_model)
+    
+    # Extract F-value, P-value, and degrees of freedom
+    f_value <- model_summary_info$fstatistic[1]
+    p_value <- pf(f_value, model_summary_info$fstatistic[2], model_summary_info$fstatistic[3], lower.tail = FALSE)
+    df1 <- model_summary_info$fstatistic[2]  # Numerator degrees of freedom
+    df2 <- model_summary_info$fstatistic[3]  # Denominator degrees of freedom
+    
+    # Extract the model equation
+    intercept <- coef(exp_model)[1]
+    slope <- coef(exp_model)[2]
+    equation <- paste0("log(Growth) = ", round(intercept, 4), " + ", round(slope, 4), " * Week")
+    
+    # Store the results in the data frame
+    model_summary <- rbind(model_summary, data.frame(Species = species, 
+                                                     Temperature = temp, 
+                                                     F_Value = f_value, 
+                                                     P_Value = p_value, 
+                                                     Degrees_of_Freedom = paste(df1, df2, sep = ", "), 
+                                                     Equation = equation))
+  }
+}
+
+# Create a scrollable table
+model_summary %>%
+  kbl(caption = "Exponential Model Summary for Each Species at Each Temperature") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = TRUE, fixed_thead = TRUE) %>%
+  scroll_box(height = "400px")
+```
+
+### Interactive Exponential Growth Curves for Each Species at Each Temperature
+
+The plot below displays the **perfect exponential growth curves** for each fungal species at different temperatures. These curves are based on the **exponential model** fitted to the data, using the equation:
+
+\[
+\text{Growth} = e^{(\text{intercept} + \text{slope} \times \text{Week})}
+\]
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.width=8, fig.height=7}
+## Initialize an empty data frame to store predicted data for the curves
+predicted_curve_data <- data.frame(Species = character(), 
+                                   Temperature = numeric(), 
+                                   Week = numeric(), 
+                                   Predicted_Growth = numeric(), 
+                                   stringsAsFactors = FALSE)
+
+# Loop over each species and temperature to generate curves
+for(species in unique(df_1_5$Species)) {
+  for(temp in unique(df_1_5$Temperature)) {
+    
+    # Filter the data for this species and temperature
+    df_subset <- df_1_5 %>% filter(Species == species, Temperature == temp)
+    
+    # Fit the exponential model (log-transformed linear)
+    exp_model <- lm(log(Growth) ~ Week, data = df_subset)
+    
+    # Extract coefficients for the model (intercept and slope)
+    intercept <- coef(exp_model)[1]
+    slope <- coef(exp_model)[2]
+    
+    # Generate predicted values for a sequence of weeks (1 to 5, or based on your data)
+    weeks <- seq(min(df_1_5$Week), max(df_1_5$Week), length.out = 100)  # 100 points for a smooth curve
+    
+    # Compute the predicted growth based on the model equation: Growth = exp(intercept + slope * Week)
+    predicted_growth <- exp(intercept + slope * weeks)
+    
+    # Store the predicted data for this species and temperature
+    predicted_curve_data <- rbind(predicted_curve_data, 
+                                  data.frame(Species = species, 
+                                             Temperature = temp, 
+                                             Week = weeks, 
+                                             Predicted_Growth = predicted_growth))
+  }
+}
+
+# Custom labeller for temperature, to directly label 15°C, 20°C, 25°C
+temperature_labeller <- as_labeller(c(
+  "15" = "15°C",
+  "20" = "20°C",
+  "25" = "25°C"
+))
+
+# Plot the perfect curves for the exponential model
+plot_perfect_curves <- ggplot(predicted_curve_data, aes(x = Week, y = Predicted_Growth, color = Species)) +
+  geom_line(size = 1.2) +  # Use geom_line to draw smooth curves
+  facet_grid(Temperature ~ Species, labeller = labeller(Temperature = temperature_labeller)) +  # Temperature as rows, Species as columns
+  labs(title = "Perfect Exponential Growth Curves Based on Model", x = "Week", y = "Predicted Growth (cm^2)") +
+  theme_minimal() +
+  theme(
+    strip.text.x = element_markdown(size = 12),        # Use element_markdown for italic facet labels
+    strip.text.y = element_text(size = 12),            # Adjust temperature label size
+    axis.text = element_text(size = 10),               # Adjust axis text size
+    plot.margin = margin(2, 2, 2, 2, "cm"),            # Add margins to avoid text overlap
+    legend.position = "none"                           # Remove redundant legend
+  )
+
+# Convert the ggplot object to an interactive plotly object
+interactive_plot <- ggplotly(plot_perfect_curves)
+
+# Display the interactive plot
+interactive_plot
+```
+
+### Calculation of the Derivative Function for the Exponential Model
+
+For each fungal species at each temperature, an **exponential growth model** was fitted to the data. The general form of the model is:
+
+\[
+\text{Growth} = e^{(\text{intercept} + \text{slope} \times \text{Week})}
+\]
+
+This model describes how the growth of the fungi changes over time. To determine how fast the growth changes with respect to time (week), we need to compute the **derivative** of the growth function with respect to the week.
+
+#### Step 1: Apply the Chain Rule
+To compute the derivative of the growth function, we apply the **chain rule**. The chain rule tells us how to differentiate composite functions like this one, where we have an exponent that depends on another variable (week). 
+
+We begin by differentiating the exponential function:
+
+\[
+\frac{d}{d\text{Week}} \left( e^{(\text{intercept} + \text{slope} \times \text{Week})} \right)
+\]
+
+The chain rule gives us two parts:
+1. The derivative of the exponential function, which is the same exponential function:
+   \[
+   e^{(\text{intercept} + \text{slope} \times \text{Week})}
+   \]
+2. The derivative of the exponent \((\text{intercept} + \text{slope} \times \text{Week})\) with respect to **week**. The derivative of this linear term is just the **slope**:
+   \[
+   \frac{d}{d\text{Week}} (\text{intercept} + \text{slope} \times \text{Week}) = \text{slope}
+   \]
+
+#### Step 2: Combine the Results
+Multiplying the results of these two derivatives (following the chain rule), we get:
+
+\[
+\frac{d(\text{Growth})}{d(\text{Week})} = \text{slope} \times e^{(\text{intercept} + \text{slope} \times \text{Week})}
+\]
+
+#### Step 3: Substitution
+We know from the original model that:
+
+\[
+\text{Growth} = e^{(\text{intercept} + \text{slope} \times \text{Week})}
+\]
+
+So, we can substitute this back into the derivative equation. Replacing the exponential term with **Growth**, we arrive at the simplified form:
+
+\[
+\frac{d(\text{Growth})}{d(\text{Week})} = \text{Growth} \times \text{slope}
+\]
+
+#### What the Derivative Tells Us:
+- The derivative function tells us the **rate of growth** at any given point in time (week).
+- It shows that the rate of growth is proportional to the current **growth** value, scaled by the **slope** of the model.
+- As the fungi grow larger (as Growth increases), their growth rate also increases, but it is controlled by the value of the slope. 
+
+In the table below, for each species and temperature combination, the derivative is expressed in the simplified form:
+
+\[
+\frac{d(\text{Growth})}{d(\text{Week})} = \text{Growth} \times \text{slope}
+\]
+
+This equation provides a clear understanding of how the rate of growth evolves over time for each species at each temperature.
+
+
+```{r derivative equation calculation}
+# Initialize a data frame to store the simplified derivative functions
+derivative_summary <- data.frame(Species = character(), 
+                                 Temperature = numeric(), 
+                                 Derivative_Function = character(),
+                                 stringsAsFactors = FALSE)
+
+# Loop over each species and temperature to compute simplified derivative functions
+for(species in unique(df_1_5$Species)) {
+  for(temp in unique(df_1_5$Temperature)) {
+    
+    # Filter the data for this species and temperature
+    df_subset <- df_1_5 %>% filter(Species == species, Temperature == temp)
+    
+    # Fit the exponential model (log-transformed linear)
+    exp_model <- lm(log(Growth) ~ Week, data = df_subset)
+    
+    # Extract the slope of the model
+    slope <- coef(exp_model)[2]
+    
+    # The simplified derivative function is Growth * slope
+    derivative_function <- paste0("d(Growth)/d(Week) = Growth * ", round(slope, 4))
+    
+    # Store the derivative function for this species and temperature
+    derivative_summary <- rbind(derivative_summary, 
+                                data.frame(Species = species, 
+                                           Temperature = temp, 
+                                           Derivative_Function = derivative_function))
+  }
+}
+
+# Display the final table
+library(knitr)
+library(kableExtra)
+
+# Create a scrollable table
+derivative_summary %>%
+  kbl(caption = "Simplified Derivative Functions of Exponential Models for Each Species at Each Temperature") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = TRUE, fixed_thead = TRUE) %>%
+  scroll_box(height = "400px")
+
+```
+
+### Rate of Growth Curves Based on the Derivative of the Exponential Model
+```{r derivative graphs, echo=FALSE, message=FALSE, warning=FALSE, fig.width=8, fig.height=7}
+# Initialize an empty data frame to store the derivative curve data
+derivative_curve_data <- data.frame(Species = character(), 
+                                    Temperature = numeric(), 
+                                    Week = numeric(), 
+                                    Rate_of_Growth = numeric(), 
+                                    stringsAsFactors = FALSE)
+
+# Loop over each species and temperature to compute derivative curves
+for(species in unique(df_1_5$Species)) {
+  for(temp in unique(df_1_5$Temperature)) {
+    
+    # Filter the data for this species and temperature
+    df_subset <- df_1_5 %>% filter(Species == species, Temperature == temp)
+    
+    # Fit the exponential model (log-transformed linear)
+    exp_model <- lm(log(Growth) ~ Week, data = df_subset)
+    
+    # Extract coefficients for the model (intercept and slope)
+    intercept <- coef(exp_model)[1]
+    slope <- coef(exp_model)[2]
+    
+    # Generate predicted growth for a sequence of weeks (1 to max week from the data)
+    weeks <- seq(min(df_1_5$Week), max(df_1_5$Week), length.out = 100)  # 100 points for smooth curve
+    predicted_growth <- exp(intercept + slope * weeks)
+    
+    # Compute the rate of growth using the derivative equation: Rate = Growth * slope
+    rate_of_growth <- predicted_growth * slope
+    
+    # Store the derivative (rate of growth) data for this species and temperature
+    derivative_curve_data <- rbind(derivative_curve_data, 
+                                   data.frame(Species = species, 
+                                              Temperature = temp, 
+                                              Week = weeks, 
+                                              Rate_of_Growth = rate_of_growth))
+  }
+}
+
+# Custom labeller for temperature, to directly label 15°C, 20°C, 25°C
+temperature_labeller <- as_labeller(c(
+  "15" = "15°C",
+  "20" = "20°C",
+  "25" = "25°C"
+))
+
+# Plot the derivative (rate of growth) curves
+plot_derivative_curves <- ggplot(derivative_curve_data, aes(x = Week, y = Rate_of_Growth, color = Species)) +
+  geom_line(size = 1.2) +  # Use geom_line to draw smooth curves
+  facet_grid(Temperature ~ Species, labeller = labeller(Temperature = temperature_labeller)) +  # Temperature as rows, Species as columns
+  labs(title = "Rate of Growth Curves Based on Derivative of Exponential Model", 
+       x = "Week", y = "Rate of Growth (cm^2 per Week)") +
+  theme_minimal() +
+  theme(
+    strip.text.x = element_markdown(size = 12),        # Use element_markdown for italic facet labels
+    strip.text.y = element_text(size = 12),            # Adjust temperature label size
+    axis.text = element_text(size = 10),               # Adjust axis text size
+    plot.margin = margin(2, 2, 2, 2, "cm"),            # Add margins to avoid text overlap
+    legend.position = "none"                           # Remove redundant legend
+  )
+
+# Convert the ggplot object to an interactive plotly object
+interactive_derivative_plot <- ggplotly(plot_derivative_curves)
+
+# Display the interactive plot
+interactive_derivative_plot
+```
+
+### Raw Growth Rate
+
+The **raw growth rate** was calculated for each fungal strain on each plate, at every temperature and time point (week). This method provides the growth rate for each individual replicate, without aggregating across plates. The growth rate measures how much the fungal colony's area increased between consecutive time points.
+
+The growth rate was computed using the following formula:
+
+\[
+\text{Growth Rate} = \frac{\text{Growth at Week}_n - \text{Growth at Week}_{n-1}}{\text{Week}_n - \text{Week}_{n-1}}
+\]
+```{r raw growth rate, echo=FALSE, message=FALSE, warning=FALSE, fig.width=8, fig.height=9 }
+
+# Step 1: Calculate raw growth rate based on strain_ID
+df_growth_rate <- df_1_5 %>%
+  group_by(strain_ID, Temperature, Plate) %>%
+  arrange(strain_ID, Temperature, Plate, Week) %>%
+  mutate(
+    Previous_Week = lag(Week),  # Previous week for each plate
+    Previous_Growth = lag(Growth),  # Previous growth value
+    Growth_Rate = ifelse(is.na(Previous_Week) | is.na(Previous_Growth), 0, (Growth - Previous_Growth) / (Week - Previous_Week))  # Growth rate calculation
+  ) %>%
+  ungroup()
+
+# Custom labeller for temperature, to directly label 15°C, 20°C, 25°C
+temperature_labeller <- as_labeller(c(
+  "15" = "15°C",
+  "20" = "20°C",
+  "25" = "25°C"
+))
+
+# Step 2: Create a static ggplot to graph the growth rate by Species, with color based on Species
+plot_growth_rate <- ggplot(df_growth_rate, aes(x = Week, y = Growth_Rate, color = Species)) +
+  geom_point(size = 2) +  # Use geom_point to plot individual data points
+  facet_grid(Temperature ~ Species, labeller = labeller(Temperature = temperature_labeller), scales = "free") +  # Facet by species and temperature with custom labeller
+  labs(title = "Growth Rate for Each Species at Different Temperatures",
+       x = "Week", y = "Growth Rate (cm^2 per Week)") +
+  theme_minimal() +
+  theme(
+    strip.text.x = element_text(size = 10),  # Adjust species label size
+    strip.text.y = element_text(size = 10),  # Adjust temperature label size
+    axis.text = element_text(size = 8),      # Adjust axis text size
+    plot.margin = margin(2, 2, 2, 2, "cm"),  # Add margins
+    legend.position = "none"                 # Eliminate the legend
+  )
+
+# Step 3: Convert the static plot to an interactive plot using plotly
+interactive_growth_rate_plot <- ggplotly(plot_growth_rate)
+
+# Step 4: Display the interactive plot
+interactive_growth_rate_plot
+```
+###Aggregated Raw Growth Rate for Each Species at Different Temperatures
+
+This figure displays the **aggregated raw growth rates** for multiple fungal species grown at various temperatures (15°C, 20°C, and 25°C). The **growth rate** is calculated based on the change in the **mean growth** between consecutive weeks, aggregated across multiple replicate plates for each species at each temperature.
+
+```{r aggregated growth rate, echo=FALSE, message=FALSE, warning=FALSE, fig.width=8, fig.height=7 }
+# Step 1: Aggregate the data by calculating the mean growth for each species, temperature, and week across plates
+df_aggregated <- df_1_5 %>%
+  group_by(Species, Temperature, Week) %>%
+  summarize(
+    Mean_Growth = mean(Growth, na.rm = TRUE)  # Calculate mean growth across plates
+  ) %>%
+  arrange(Species, Temperature, Week)
+
+# Step 2: Calculate the growth rate using the aggregated data
+df_aggregated_growth_rate <- df_aggregated %>%
+  mutate(
+    Previous_Week = lag(Week),  # Previous week for each species and temperature
+    Previous_Mean_Growth = lag(Mean_Growth),  # Previous mean growth value
+    Growth_Rate = ifelse(is.na(Previous_Week) | is.na(Previous_Mean_Growth), 0, 
+                         (Mean_Growth - Previous_Mean_Growth) / (Week - Previous_Week))  # Calculate mean growth rate
+  ) %>%
+  ungroup()
+
+# Custom labeller for temperature, to directly label 15°C, 20°C, 25°C
+temperature_labeller <- as_labeller(c(
+  "15" = "15°C",
+  "20" = "20°C",
+  "25" = "25°C"
+))
+
+# Step 3: Create the plot for aggregated raw growth rate
+plot_aggregated_growth_rate <- ggplot(df_aggregated_growth_rate, aes(x = Week, y = Growth_Rate, color = Species)) +
+  geom_point(size = 2) +  # Plot aggregated growth rate points
+  geom_line()+
+  facet_grid(Temperature ~ Species, labeller = labeller(Temperature = temperature_labeller), scales = "free") +  # Facet by species and temperature
+  labs(title = "Aggregated Raw Growth Rate for Each Species at Different Temperatures",
+       x = "Week", y = "Mean Growth Rate (cm^2 per Week)") +
+  theme_minimal() +
+  theme(
+    strip.text.x = element_text(size = 10),  # Adjust species label size
+    strip.text.y = element_text(size = 10),  # Adjust temperature label size
+    axis.text = element_text(size = 8),      # Adjust axis text size
+    plot.margin = margin(2, 2, 2, 2, "cm"),  # Add margins
+    legend.position = "none"                 # Remove legend
+  )
+
+# Step 4: Convert to an interactive plot using plotly (optional)
+interactive_aggregated_growth_rate_plot <- ggplotly(plot_aggregated_growth_rate)
+
+# Step 5: Display the interactive plot
+interactive_aggregated_growth_rate_plot
+```
+
+
+### Generated Niche Curve
+
+This niche curve represents the **growth rate at week 5** (The highest growth rate) for various fungal species grown at different temperatures (15°C, 20°C, and 25°C). The **growth rate** was calculated using the derivative of an exponential growth model fitted to each species' growth data.
+```{r model niche curve,message=FALSE, warning=FALSE}
+# Step 1: Fit an exponential model for each species and temperature, and calculate the growth rate at Week 5
+df_growth_rate_week5 <- data.frame(Species = character(), 
+                                   Temperature = numeric(), 
+                                   Growth_Rate_Week5 = numeric(), 
+                                   stringsAsFactors = FALSE)
+
+for(species in unique(df_1_5$Species)) {
+  for(temp in unique(df_1_5$Temperature)) {
+    
+    # Filter the data for this species and temperature
+    df_subset <- df_1_5 %>% filter(Species == species, Temperature == temp)
+    
+    # Fit the exponential model (log-transformed linear)
+    exp_model <- lm(log(Growth) ~ Week, data = df_subset)
+    
+    # Extract coefficients for the model (intercept and slope)
+    intercept <- coef(exp_model)[1]
+    slope <- coef(exp_model)[2]
+    
+    # Calculate the growth at Week 5
+    growth_at_week5 <- exp(intercept + slope * 5)  # Growth at week 5
+    
+    # Calculate the derivative (growth rate) at Week 5
+    growth_rate_at_week5 <- growth_at_week5 * slope
+    
+    # Store the results in the dataframe
+    df_growth_rate_week5 <- rbind(df_growth_rate_week5, 
+                                  data.frame(Species = species, 
+                                             Temperature = as.numeric(temp),  # Ensure Temperature is numeric
+                                             Growth_Rate_Week5 = growth_rate_at_week5))
+  }
+}
+
+# Step 2: Create the plot of maximum growth rate at week 5 for each temperature
+plot_growth_rate_temp <- ggplot(df_growth_rate_week5, aes(x = Temperature, y = Growth_Rate_Week5, color = Species)) +
+  geom_point(size = 4) +  # Plot points for growth rate at week 5
+  geom_line(aes(group = Species), size = 1.2) +  # Connect points by species
+  scale_x_continuous(breaks = c(15, 20, 25), labels = c("15°C", "20°C", "25°C")) +  # Label temperature in °C
+  labs(title = "Niche Curve of Different Fungi",
+       x = "Temperature (°C)", y = "Growth Rate at Week 5 (cm^2 per Week)") +
+  theme_minimal() +
+  theme(
+    strip.text.x = element_text(size = 10),  # Adjust species label size
+    axis.text = element_text(size = 10),     # Adjust axis text size
+    axis.title = element_text(size = 12),    # Adjust axis title size
+    plot.title = element_text(size = 14, face = "bold"),  # Adjust title size
+    legend.position = "right"                # Keep the legend for species
+  )
+
+# Step 3: Convert to interactive plot using plotly
+interactive_plot_growth_rate_temp <- ggplotly(plot_growth_rate_temp)
+
+# Step 4: Display the interactive plot
+interactive_plot_growth_rate_temp
+```
+
+### Raw Aggregated Niche Curve
+```{r Raw Niche curve, message=FALSE, warning=FALSE}
+# Step 1: Aggregate the data by calculating the mean growth for each species, temperature, and week across plates
+df_aggregated <- df_1_5 %>%
+  group_by(Species, Temperature, Week) %>%
+  summarize(
+    Mean_Growth = mean(Growth, na.rm = TRUE)  # Calculate mean growth across plates
+  ) %>%
+  arrange(Species, Temperature, Week)
+
+# Step 2: Calculate the growth rate using the aggregated data
+df_aggregated_growth_rate <- df_aggregated %>%
+  mutate(
+    Previous_Week = lag(Week),  # Previous week for each species and temperature
+    Previous_Mean_Growth = lag(Mean_Growth),  # Previous mean growth value
+    Growth_Rate = ifelse(is.na(Previous_Week) | is.na(Previous_Mean_Growth), 0, 
+                         (Mean_Growth - Previous_Mean_Growth) / (Week - Previous_Week))  # Calculate mean growth rate
+  ) %>%
+  ungroup()
+
+# Step 3: Find the maximum growth rate for each species and temperature
+df_max_growth_rate <- df_aggregated_growth_rate %>%
+  group_by(Species, Temperature) %>%
+  summarize(Max_Growth_Rate = max(Growth_Rate, na.rm = TRUE)) %>%
+  mutate(Temperature = as.numeric(Temperature)) %>%  # Convert Temperature to numeric
+  ungroup()
+
+# Step 4: Create the plot of maximum growth rate for each temperature
+plot_max_growth_rate_temp <- ggplot(df_max_growth_rate, aes(x = Temperature, y = Max_Growth_Rate, color = Species)) +
+  geom_point(size = 4) +  # Plot points for max growth rate
+  geom_line(aes(group = Species), size = 1.2) +  # Connect points by species
+  scale_x_continuous(breaks = c(15, 20, 25), labels = c("15°C", "20°C", "25°C")) +  # Label temperature in °C
+  labs(title = "Raw Niche Curve",
+       x = "Temperature (°C)", y = "Maximum Growth Rate (cm^2 per Week)") +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 10),     # Adjust axis text size
+    axis.title = element_text(size = 12),    # Adjust axis title size
+    plot.title = element_text(size = 14, face = "bold"),  # Adjust title size
+    legend.position = "right"                # Keep the legend for species
+  )
+
+# Step 5: Convert to interactive plot using plotly
+interactive_plot_max_growth_rate_temp <- ggplotly(plot_max_growth_rate_temp)
+
+# Step 6: Display the interactive plot
+interactive_plot_max_growth_rate_temp
+```
+
+
+
